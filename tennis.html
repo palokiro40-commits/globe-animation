@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>8-Bit Tennis</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100%;height:100%;background:#0a0a0a;overflow:hidden;
+  font-family:'Press Start 2P',monospace;touch-action:none;user-select:none;
+  display:flex;align-items:center;justify-content:center;}
+#wrap{position:relative;}
+canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges;background:#000;}
+#scan{position:absolute;inset:0;
+  background:repeating-linear-gradient(to bottom,
+    rgba(0,0,0,0) 0,rgba(0,0,0,0) 2px,
+    rgba(0,0,0,0.18) 3px,rgba(0,0,0,0) 4px);
+  pointer-events:none;mix-blend-mode:multiply;}
+
+/* Name input overlay */
+#nameScreen{
+  position:absolute;inset:0;
+  background:rgba(0,0,0,0.92);
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  gap:18px;z-index:20;
+}
+#nameScreen h2{color:#fae850;font-size:11px;letter-spacing:2px;text-align:center;
+  text-shadow:0 0 10px #fae850;}
+#nameScreen p{color:#aaa;font-size:7px;text-align:center;line-height:1.8;}
+.name-input{
+  background:rgba(255,255,255,0.08);
+  border:2px solid #3858d8;
+  color:#fff;font-family:'Press Start 2P',monospace;
+  font-size:10px;padding:8px 12px;
+  width:160px;text-align:center;outline:none;
+  border-radius:4px;
+}
+.name-input:focus{border-color:#fae850;}
+.name-btn{
+  background:#e23838;border:none;
+  color:#fff;font-family:'Press Start 2P',monospace;
+  font-size:9px;padding:10px 24px;
+  cursor:pointer;border-radius:4px;
+  box-shadow:0 4px 0 #8a1010;
+  transition:all 0.1s;
+}
+.name-btn:active{transform:translateY(2px);box-shadow:0 2px 0 #8a1010;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="220" height="390"></canvas>
+  <div id="scan"></div>
+
+  <!-- Name input screen -->
+  <div id="nameScreen">
+    <h2>🎾 8-BIT TENNIS</h2>
+    <p>Masukkan nama pemain</p>
+    <input class="name-input" id="p1name" maxlength="8" placeholder="NAMA KAMU" value="PLAYER"/>
+    <input class="name-input" id="p2name" maxlength="8" placeholder="NAMA LAWAN" value="TEMAN"/>
+    <p style="color:#666;font-size:6px;">Kosongkan lawan = lawan AI</p>
+    <button class="name-btn" id="startNameBtn">▶ MAIN!</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ── Canvas setup ──────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 220, H = 390;
+
+// Scale canvas to fit screen
+function resizeCanvas() {
+  const wrap = document.getElementById('wrap');
+  const scaleX = (window.innerWidth - 20) / W;
+  const scaleY = (window.innerHeight - 20) / H;
+  const scale = Math.min(scaleX, scaleY, 3);
+  canvas.style.width  = Math.floor(W * scale) + 'px';
+  canvas.style.height = Math.floor(H * scale) + 'px';
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// ── Colors ────────────────────────────────────────────────────
+const C = {
+  sky:'#3aa0e8', skyHigh:'#62b8ec', stadium:'#2a1a0a',
+  railing:'#105506', courtA:'#c47a3d', courtB:'#b06a30',
+  courtDark:'#7a4520', lines:'#f5f5f5', net:'#dcdcdc',
+  netDark:'#888', player:'#e23838', playerAlt:'#8a1010',
+  cpu:'#3858d8', cpuAlt:'#1a2a8a', skin:'#f4c890',
+  ball:'#fae850', ballEdge:'#c9a418', shadow:'#0a0a14',
+  accent:'#f0a020', splashBg:'#1a0e2e'
+};
+const CROWD_HATS  = ['#e23838','#3858d8','#fae850','#2d7a3e','#1a1a1a','#f0a020','#a040b8','#3a8a5a'];
+const CROWD_SKINS = ['#f4c890','#d4a070','#8a6040','#a07050'];
+
+// ── Court geometry ────────────────────────────────────────────
+const COURT = {
+  nearY:372, farY:104,
+  nearLeftX:30, nearRightX:190, farLeftX:78, farRightX:142,
+  nearLeftXOuter:8, nearRightXOuter:212, farLeftXOuter:64, farRightXOuter:156
+};
+const PHYS = { gravity:0.08, flightFrames:60, bounceDamp:0.55, netZ:8, hitZmin:2, hitZmax:30, hitRadius:0.2 };
+
+function projectGround(x, y) {
+  const t = Math.pow(Math.max(0.001, y), 0.82);
+  const lx = COURT.nearLeftX  + (COURT.farLeftX  - COURT.nearLeftX)  * t;
+  const rx = COURT.nearRightX + (COURT.farRightX - COURT.nearRightX) * t;
+  return { sx: lx + (rx-lx)*(x+1)*0.5, sy: COURT.nearY + (COURT.farY-COURT.nearY)*t };
+}
+function projectScale(y) { return 1 - 0.55*Math.pow(Math.max(0.001,y),0.82); }
+function project(x,y,z) {
+  const g = projectGround(x,y); const s = projectScale(y);
+  return { sx:g.sx, sy:g.sy - z*s, scale:s };
+}
+
+// ── Crowd ─────────────────────────────────────────────────────
+const crowd = [];
+for (let row=0;row<5;row++) {
+  const offsetX = row%2===0?0:2;
+  for (let col=0;col<Math.ceil(W/4)+2;col++) {
+    const x = col*4+offsetX-1;
+    if (x<-1||x>W) continue;
+    const seed = Math.abs((col*31+row*53+11)|0);
+    crowd.push({x, y:52+row*9, hat:CROWD_HATS[seed%CROWD_HATS.length],
+      skin:CROWD_SKINS[(seed>>2)%CROWD_SKINS.length],
+      flash:Math.floor(Math.random()*3000)});
+  }
+}
+
+// ── Names ─────────────────────────────────────────────────────
+let p1Name = 'PLAYER', p2Name = 'CPU';
+let vsAI = true;
+
+document.getElementById('startNameBtn').addEventListener('click', () => {
+  p1Name = (document.getElementById('p1name').value.trim().toUpperCase() || 'PLAYER').slice(0,8);
+  const p2val = document.getElementById('p2name').value.trim().toUpperCase();
+  vsAI = !p2val || p2val === 'TEMAN' || p2val === 'AI' || p2val === 'CPU';
+  p2Name = p2val || 'CPU';
+  document.getElementById('nameScreen').style.display = 'none';
+  gameState = 'splash';
+});
+
+// ── Game state ────────────────────────────────────────────────
+let gameState = 'nameInput';
+let frame = 0;
+let score = [0, 0]; // sets
+let points = [0, 0];
+const POINT_NAMES = ['0','15','30','40','ADV'];
+let pointEndTimer = 0;
+let pointMsg = '';
+let matchWinner = '';
+let serveSide = 0; // 0=p1, 1=p2/cpu
+
+// ── Ball ──────────────────────────────────────────────────────
+const ball = {
+  x:0, y:0.5, z:0, vx:0, vy:0, vz:0,
+  active:false, outOfPlay:false, bouncedOnTarget:false,
+  lastHitter:null, targetSide:null, hitNet:false,
+  reset() {
+    this.x=0; this.y=0.5; this.z=0; this.vx=0; this.vy=0; this.vz=0;
+    this.active=false; this.outOfPlay=false; this.bouncedOnTarget=false;
+    this.lastHitter=null; this.targetSide=null; this.hitNet=false;
+  },
+  hit(tx,ty,hitter) {
+    const T=PHYS.flightFrames;
+    this.vx=(tx-this.x)/T; this.vy=(ty-this.y)/T;
+    this.vz=0.5*PHYS.gravity*T - this.z/T;
+    this.lastHitter=hitter; this.targetSide=hitter==='p1'?'p2':'p1';
+    this.bouncedOnTarget=false; this.active=true; this.outOfPlay=false; this.hitNet=false;
+  },
+  update() {
+    if (!this.active) return;
+    const prevY=this.y;
+    this.x+=this.vx; this.y+=this.vy; this.z+=this.vz; this.vz-=PHYS.gravity;
+    const crossed=(prevY<0.5&&this.y>=0.5)||(prevY>0.5&&this.y<=0.5);
+    if (crossed&&this.z<PHYS.netZ) { this.hitNet=true; this.outOfPlay=true; this.active=false; return; }
+    if (this.z<=0) {
+      this.z=0; this.vz=-this.vz*PHYS.bounceDamp;
+      if (!this.bouncedOnTarget) {
+        const inX=Math.abs(this.x)<=1, inY=this.y>=0&&this.y<=1;
+        const ok=(this.targetSide==='p2'&&this.y>0.5)||(this.targetSide==='p1'&&this.y<0.5);
+        if (inX&&inY&&ok) this.bouncedOnTarget=true;
+        else { this.outOfPlay=true; this.active=false; return; }
+      }
+      if (Math.abs(this.vz)<0.5) this.active=false;
+    }
+    if (Math.abs(this.x)>1.6||this.y<-0.25||this.y>1.25) { this.outOfPlay=true; this.active=false; }
+  },
+  predictHit() {
+    let x=this.x,y=this.y,z=this.z,vx=this.vx,vy=this.vy,vz=this.vz,b=this.bouncedOnTarget;
+    for (let i=0;i<200;i++) {
+      x+=vx; y+=vy; z+=vz; vz-=PHYS.gravity;
+      if (z<=0) { if(!b){b=true;z=0;vz=-vz*PHYS.bounceDamp;continue;} return{x,y}; }
+      if (b&&vz<=0) return{x,y};
+    }
+    return{x,y};
+  },
+  draw() {
+    if (!this.active&&this.z<=0&&!this.outOfPlay) return;
+    const p=project(this.x,this.y,this.z);
+    const g=projectGround(this.x,this.y);
+    const r=Math.max(2,Math.round(4*p.scale));
+    ctx.fillStyle=C.shadow;
+    ctx.beginPath(); ctx.ellipse(g.sx,g.sy,r,Math.max(1,r*0.4),0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=C.ballEdge;
+    ctx.beginPath(); ctx.arc(p.sx,p.sy,r,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=C.ball;
+    ctx.beginPath(); ctx.arc(p.sx-1,p.sy-1,Math.max(1,r-1),0,Math.PI*2); ctx.fill();
+  }
+};
+
+// ── Players ───────────────────────────────────────────────────
+function makePlayer(side) {
+  return {
+    side, // 'near'|'far'
+    id: side==='near'?'p1':'p2',
+    x:0, y:side==='near'?0.05:0.95,
+    tx:0, ty:side==='near'?0.05:0.95,
+    speed:0.015, swing:0, facing:1,
+    setTarget(x,y) {
+      this.tx=Math.max(-0.95,Math.min(0.95,x));
+      this.ty=this.side==='near'?Math.max(0,Math.min(0.45,y)):Math.max(0.55,Math.min(1,y));
+    },
+    update() {
+      const dx=this.tx-this.x, dy=this.ty-this.y, d=Math.hypot(dx,dy);
+      if (d>this.speed) { this.x+=dx/d*this.speed; this.y+=dy/d*this.speed; if(Math.abs(dx)>0.001) this.facing=dx>0?1:-1; }
+      else { this.x=this.tx; this.y=this.ty; }
+      if (this.swing>0) this.swing--;
+    },
+    canHit() {
+      if (!ball.active||ball.targetSide!==this.id||!ball.bouncedOnTarget) return false;
+      if (ball.z<PHYS.hitZmin||ball.z>PHYS.hitZmax) return false;
+      return Math.hypot(ball.x-this.x,ball.y-this.y)<=PHYS.hitRadius;
+    },
+    draw() {
+      const p=project(this.x,this.y,0), s=p.scale;
+      const w=Math.max(10,Math.round(18*s)), h=Math.max(20,Math.round(34*s));
+      const main=this.side==='near'?C.player:C.cpu, alt=this.side==='near'?C.playerAlt:C.cpuAlt;
+      ctx.fillStyle=C.shadow; ctx.beginPath();
+      ctx.ellipse(p.sx,p.sy+1,w*0.5,w*0.25,0,0,Math.PI*2); ctx.fill();
+      // Legs
+      ctx.fillStyle='#fff'; ctx.fillRect(Math.round(p.sx-w/2),Math.round(p.sy-h*0.45),w,Math.round(h*0.25));
+      // Arms
+      ctx.fillStyle=C.skin;
+      ctx.fillRect(Math.round(p.sx-w/2),Math.round(p.sy-h*0.2),Math.floor(w*0.4),Math.round(h*0.2));
+      ctx.fillRect(Math.round(p.sx+w/2-Math.floor(w*0.4)),Math.round(p.sy-h*0.2),Math.floor(w*0.4),Math.round(h*0.2));
+      // Body
+      ctx.fillStyle=main; ctx.fillRect(Math.round(p.sx-w/2),Math.round(p.sy-h*0.85),w,Math.round(h*0.45));
+      ctx.fillStyle=alt;  ctx.fillRect(Math.round(p.sx-w/2),Math.round(p.sy-h*0.55),w,2);
+      // Head
+      const hd=Math.max(7,Math.round(10*s));
+      ctx.fillStyle=C.skin; ctx.fillRect(Math.round(p.sx-hd/2),Math.round(p.sy-h-hd*0.4),hd,hd);
+      ctx.fillStyle=alt;    ctx.fillRect(Math.round(p.sx-hd/2),Math.round(p.sy-h-hd*0.4),hd,Math.max(2,Math.round(hd*0.35)));
+      // Racket
+      const sw=this.swing>0, dir=this.facing;
+      const tx2=Math.round(p.sx), sy2=Math.round(p.sy-h*0.65);
+      let rx,ry;
+      if(sw){rx=tx2+dir*Math.round(w*0.95);ry=sy2-1;}
+      else {const wx=tx2+dir*Math.round(w*0.4),wy=sy2+Math.round(h*0.2);rx=wx;ry=wy-Math.round(h*0.3);}
+      const cx=rx,cy=ry;
+      ctx.fillStyle='#111';
+      ctx.fillRect(cx-2,cy-4,5,1); ctx.fillRect(cx-2,cy+4,5,1);
+      ctx.fillRect(cx-4,cy-2,1,5); ctx.fillRect(cx+4,cy-2,1,5);
+      ctx.fillStyle='#dcdcdc';
+      ctx.fillRect(cx-2,cy-3,5,7); ctx.fillRect(cx-3,cy-1,1,3); ctx.fillRect(cx+3,cy-1,1,3);
+    }
+  };
+}
+
+const p1 = makePlayer('near');
+const p2 = makePlayer('far');
+
+// ── AI logic ──────────────────────────────────────────────────
+function aiUpdate() {
+  if (!vsAI) return;
+  if (ball.active&&ball.lastHitter==='p1'&&ball.targetSide==='p2') {
+    const hp=ball.predictHit();
+    p2.setTarget(hp.x+(Math.random()-0.5)*0.05, hp.y);
+  }
+  if (p2.canHit()) {
+    const z=Math.random();
+    const tx=z<0.34?-0.6+(Math.random()-0.5)*0.18:z<0.68?0+(Math.random()-0.5)*0.2:0.6+(Math.random()-0.5)*0.18;
+    const ty=0.1+Math.random()*0.3;
+    ball.hit(tx,ty,'p2');
+    p2.swing=14;
+  }
+}
+
+// ── Input ─────────────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', e=>{ keys[e.key]=true; });
+window.addEventListener('keyup',   e=>{ keys[e.key]=false; });
+
+// Touch controls
+let touchDir = 0; // -1 left, 1 right, 0 none
+let touchFire = false;
+
+function getTouchPos(e) {
+  const rect=canvas.getBoundingClientRect();
+  const scaleX=W/rect.width;
+  return Array.from(e.touches).map(t=>({
+    x:(t.clientX-rect.left)*scaleX,
+    y:(t.clientY-rect.top)*(H/rect.height)
+  }));
+}
+
+canvas.addEventListener('touchstart', e=>{
+  e.preventDefault();
+  const pts=getTouchPos(e);
+  pts.forEach(p=>{
+    if (p.y>H*0.75) {
+      if (p.x<W*0.35) touchDir=-1;
+      else if (p.x>W*0.65) touchDir=1;
+      else touchFire=true;
+    } else if (gameState==='splash') { gameState='serving'; }
+    else if (gameState==='pointEnd'&&pointEndTimer<=0) startPoint();
+    else if (gameState==='matchEnd') initGame();
+  });
+},{passive:false});
+
+canvas.addEventListener('touchend', e=>{
+  e.preventDefault();
+  touchDir=0; touchFire=false;
+},{passive:false});
+
+canvas.addEventListener('touchmove', e=>{
+  e.preventDefault();
+  const pts=getTouchPos(e);
+  pts.forEach(p=>{
+    if (p.y>H*0.75) {
+      touchDir = p.x<W*0.35?-1:p.x>W*0.65?1:0;
+    }
+  });
+},{passive:false});
+
+// Click/tap on canvas
+canvas.addEventListener('click', ()=>{
+  if (gameState==='splash') gameState='serving';
+  else if (gameState==='pointEnd'&&pointEndTimer<=0) startPoint();
+  else if (gameState==='matchEnd') initGame();
+});
+
+// ── Scoring ───────────────────────────────────────────────────
+function awardPoint(winner) {
+  const w=winner==='p1'?0:1, l=winner==='p1'?1:0;
+  points[w]++;
+  // Deuce logic
+  if (points[0]>=3&&points[1]>=3) {
+    if (Math.abs(points[0]-points[1])>=2) {
+      score[points[0]>points[1]?0:1]++;
+      pointMsg=(points[0]>points[1]?p1Name:p2Name)+' WINS SET!';
+      points=[0,0];
+      if (score[0]>=3||score[1]>=3) { gameState='matchEnd'; matchWinner=score[0]>=3?p1Name:p2Name; return; }
+    } else { pointMsg=points[0]>points[1]?(p1Name+' ADV'):(p2Name+' ADV'); }
+  } else {
+    pointMsg=(winner==='p1'?p1Name:p2Name)+' POINT!';
+    if (points[w]>=4) {
+      score[w]++; points=[0,0];
+      pointMsg=(winner==='p1'?p1Name:p2Name)+' WINS SET!';
+      if (score[0]>=3||score[1]>=3) { gameState='matchEnd'; matchWinner=score[0]>=3?p1Name:p2Name; return; }
+    }
+  }
+  gameState='pointEnd'; pointEndTimer=90;
+}
+
+function startPoint() {
+  ball.reset();
+  p1.x=0; p1.y=0.08; p1.tx=0; p1.ty=0.08;
+  p2.x=0; p2.y=0.92; p2.tx=0; p2.ty=0.92;
+  gameState='serving';
+  serveSide=1-serveSide;
+}
+
+function initGame() {
+  score=[0,0]; points=[0,0]; serveSide=0;
+  ball.reset();
+  p1.x=0;p1.y=0.08;p2.x=0;p2.y=0.92;
+  gameState='splash';
+}
+
+// ── Draw court ────────────────────────────────────────────────
+function drawCourt() {
+  ctx.fillStyle=C.skyHigh; ctx.fillRect(0,26,W,8);
+  ctx.fillStyle=C.sky;     ctx.fillRect(0,34,W,14);
+  ctx.fillStyle=C.stadium; ctx.fillRect(0,48,W,4);
+
+  // Crowd
+  ctx.fillStyle='#0e0805'; ctx.fillRect(0,48,W,50);
+  crowd.forEach(h=>{
+    ctx.fillStyle=h.hat;  ctx.fillRect(h.x,h.y+2,2,3);
+    ctx.fillStyle=h.skin; ctx.fillRect(h.x,h.y,2,2);
+    if ((frame+h.flash)%3000<3) { ctx.fillStyle='#fff'; ctx.fillRect(h.x-1,h.y-1,4,5); }
+  });
+
+  ctx.fillStyle=C.railing; ctx.fillRect(0,94,W,6);
+  ctx.fillStyle='#241410'; ctx.fillRect(0,100,W,4);
+  ctx.fillStyle=C.courtDark; ctx.fillRect(0,104,W,H-104);
+
+  // Court surface
+  ctx.fillStyle=C.courtA;
+  ctx.beginPath();
+  ctx.moveTo(COURT.nearLeftXOuter,COURT.nearY);
+  ctx.lineTo(COURT.nearRightXOuter,COURT.nearY);
+  ctx.lineTo(COURT.farRightXOuter,COURT.farY);
+  ctx.lineTo(COURT.farLeftXOuter,COURT.farY);
+  ctx.closePath(); ctx.fill();
+
+  // Alternating zones
+  [[0.25,0.5],[0.5,0.75]].forEach(([y1,y2])=>{
+    const a=projectGround(-1,y1),b=projectGround(1,y1);
+    const c=projectGround(1,y2),d=projectGround(-1,y2);
+    ctx.fillStyle=C.courtB;
+    ctx.beginPath(); ctx.moveTo(a.sx,a.sy); ctx.lineTo(b.sx,b.sy);
+    ctx.lineTo(c.sx,c.sy); ctx.lineTo(d.sx,d.sy); ctx.closePath(); ctx.fill();
+  });
+
+  // Lines
+  ctx.strokeStyle=C.lines; ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(COURT.nearLeftXOuter,COURT.nearY); ctx.lineTo(COURT.nearRightXOuter,COURT.nearY);
+  ctx.lineTo(COURT.farRightXOuter,COURT.farY); ctx.lineTo(COURT.farLeftXOuter,COURT.farY);
+  ctx.closePath(); ctx.stroke();
+
+  [[-1,0,-1,1],[1,0,1,1],[-1,0.25,1,0.25],[-1,0.75,1,0.75],[0,0.25,0,0.75],
+   [-0.05,1,0.05,1],[-0.05,0,0.05,0]].forEach(([x1,y1,x2,y2])=>{
+    const a=projectGround(x1,y1),b=projectGround(x2,y2);
+    ctx.beginPath(); ctx.moveTo(a.sx+0.5,a.sy+0.5); ctx.lineTo(b.sx+0.5,b.sy+0.5); ctx.stroke();
+  });
+
+  // Net
+  const nl=projectGround(-1.55,0.5), nr=projectGround(1.55,0.5), nH=18;
+  ctx.fillStyle=C.netDark; ctx.fillRect(nl.sx,nl.sy-nH,nr.sx-nl.sx,nH);
+  ctx.fillStyle=C.net;
+  for (let y=0;y<nH;y+=2) ctx.fillRect(nl.sx,nl.sy-nH+y,nr.sx-nl.sx,1);
+  ctx.fillStyle='#fff'; ctx.fillRect(nl.sx,nl.sy-nH,nr.sx-nl.sx,2);
+  ctx.fillStyle='#222';
+  ctx.fillRect(nl.sx-2,nl.sy-nH-2,2,nH+4);
+  ctx.fillRect(nr.sx,nr.sy-nH-2,2,nH+4);
+}
+
+// ── Draw HUD ──────────────────────────────────────────────────
+function drawHUD() {
+  // Top bar
+  ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.fillRect(0,0,W,26);
+
+  // Names & sets
+  ctx.fillStyle='#e23838'; ctx.font='6px "Press Start 2P"';
+  ctx.fillText(p1Name.slice(0,6), 4, 10);
+  ctx.fillStyle='#fae850';
+  ctx.fillText(score[0], 4, 22);
+
+  ctx.fillStyle='#3858d8';
+  const n2=p2Name.slice(0,6);
+  ctx.fillText(n2, W-4-n2.length*6, 10);
+  ctx.fillStyle='#fae850';
+  ctx.fillText(score[1], W-10, 22);
+
+  // Points
+  const pt1=POINT_NAMES[Math.min(points[0],4)], pt2=POINT_NAMES[Math.min(points[1],4)];
+  ctx.fillStyle='#fff'; ctx.textAlign='center';
+  ctx.fillText(pt1+' - '+pt2, W/2, 10);
+  ctx.fillStyle='#aaa'; ctx.font='5px "Press Start 2P"';
+  ctx.fillText('BEST OF 5 SETS', W/2, 21);
+  ctx.textAlign='left';
+
+  // Mobile controls hint
+  ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(0,H-30,W,30);
+  ctx.fillStyle='rgba(255,255,255,0.3)';
+  ctx.fillRect(2,H-28,60,26); // left
+  ctx.fillRect(W-62,H-28,60,26); // right
+  ctx.fillRect(W/2-22,H-28,44,26); // fire
+  ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='7px "Press Start 2P"';
+  ctx.textAlign='center';
+  ctx.fillText('◀',32,H-11);
+  ctx.fillText('▶',W-32,H-11);
+  ctx.fillStyle='#fae850';
+  ctx.fillText('HIT',W/2,H-11);
+  ctx.textAlign='left';
+}
+
+// ── Splash screen ─────────────────────────────────────────────
+function drawSplash() {
+  ctx.fillStyle=C.splashBg; ctx.fillRect(0,0,W,H);
+
+  // Stars
+  ctx.fillStyle='#fff';
+  for (let i=0;i<60;i++) {
+    const sx=(i*37+frame*0.2)%W, sy=(i*53)%H;
+    ctx.fillRect(sx,sy,1,1);
+  }
+
+  ctx.fillStyle='#fae850'; ctx.font='bold 11px "Press Start 2P"';
+  ctx.textAlign='center';
+  ctx.shadowColor='#fae850'; ctx.shadowBlur=10;
+  ctx.fillText('🎾 8-BIT', W/2, 120);
+  ctx.fillText('TENNIS', W/2, 140);
+  ctx.shadowBlur=0;
+
+  ctx.fillStyle='#e23838'; ctx.font='7px "Press Start 2P"';
+  ctx.fillText(p1Name+' VS', W/2, 175);
+  ctx.fillStyle='#3858d8';
+  ctx.fillText(vsAI?'CPU AI':p2Name, W/2, 192);
+
+  ctx.fillStyle='#aaa'; ctx.font='5px "Press Start 2P"';
+  ctx.fillText('ARROW / WASD = MOVE', W/2, 230);
+  ctx.fillText('SPACE / UP = HIT', W/2, 244);
+  ctx.fillText('TAP LEFT/RIGHT/CENTER', W/2, 258);
+
+  if (Math.floor(frame/20)%2===0) {
+    ctx.fillStyle='#0f0'; ctx.font='8px "Press Start 2P"';
+    ctx.fillText('▶ TAP / CLICK START', W/2, 310);
+  }
+  ctx.textAlign='left';
+}
+
+// ── Point end screen ──────────────────────────────────────────
+function drawPointEnd() {
+  ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(0,H/2-30,W,60);
+  ctx.fillStyle='#fae850'; ctx.font='8px "Press Start 2P"';
+  ctx.textAlign='center'; ctx.shadowColor='#fae850'; ctx.shadowBlur=8;
+  ctx.fillText(pointMsg, W/2, H/2-8);
+  ctx.shadowBlur=0;
+  if (pointEndTimer<=0&&Math.floor(frame/15)%2===0) {
+    ctx.fillStyle='#fff'; ctx.font='6px "Press Start 2P"';
+    ctx.fillText('TAP TO CONTINUE', W/2, H/2+14);
+  }
+  ctx.textAlign='left';
+}
+
+// ── Match end ─────────────────────────────────────────────────
+function drawMatchEnd() {
+  ctx.fillStyle='rgba(0,0
